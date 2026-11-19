@@ -262,6 +262,11 @@
     if (!isCached(f)) {
       if (!token()) { if (confirm('登入已過期，要播放還沒存到 iPad 的影片需要重新登入 Google。現在登入？')) login(); return; }
       // 沒存過的片：經 service worker 串流，點了馬上播，不先下載
+      // 先確認 Google 還認這個登入（token 可能提早失效，App 只看到期時間會誤判）
+      try {
+        const chk = await fetch(API + '/drive/v3/about?fields=kind', { headers: { Authorization: 'Bearer ' + token() } });
+        if (chk.status === 401) { localStorage.removeItem(LS.token); updateHeader(); if (confirm('登入已失效，要播放還沒存到 iPad 的影片需要重新登入 Google。現在登入？')) login(); return; }
+      } catch (e) { /* 沒網路就交給下面的流程顯示錯誤 */ }
       if (await streamReady()) {
         const src = new URL('stream/' + encodeURIComponent(f.id) + '?size=' + (f.size || 0) + '&md5=' + encodeURIComponent(f.md5Checksum || ''), location.href).href;
         Player.open(Object.assign(opts, {

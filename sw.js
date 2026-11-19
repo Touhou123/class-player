@@ -5,7 +5,7 @@
 //    把 206 原樣傳回。<video> 自己帶不了 Authorization，所以由這裡代理；同源網址也讓 canvas 不會被汙染。
 //    /stream/ 的回應絕對不進外殼快取。
 // 部署新版時把 VERSION 改掉，iPad 下次開啟會換新外殼。
-const VERSION = 'shell-2026-11-19e-stream';
+const VERSION = 'shell-2026-11-19f';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'player.js', 'config.js',
   'manifest.webmanifest', 'data/catalog.json',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
