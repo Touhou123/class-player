@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light only">
+<meta name="theme-color" content="#f6f7f9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="課堂動畫">
+<title>課堂動畫</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="hdr">
+  <button class="btn home" id="bHome">🏠 首頁</button>
+  <button class="btn back" id="bBack">‹ 上一層</button>
+  <div class="crumb" id="crumb"></div>
+  <button class="btn ghost" id="bDev" hidden>🧪 本機影片</button>
+  <button class="btn ghost" id="bLogin">登入 Google</button>
+  <button class="btn ghost" id="bManage">⚙ 管理</button>
+</header>
+<div class="status" id="status" hidden></div>
+<main id="main"></main>
+<input type="file" id="devFile" accept="video/mp4,video/*" hidden>
+
+<div class="player" id="player" hidden>
+  <div class="ptop">
+    <button class="btn home" id="pHome">🏠 首頁</button>
+    <span class="ptitle" id="pTitle"></span>
+    <button class="btn back" id="pClose">✕ 回章節</button>
+  </div>
+  <div class="stage" id="stage">
+    <video id="vid" playsinline webkit-playsinline preload="auto"></video>
+    <div class="mask" id="mask"></div>
+    <div class="pmsg" id="pMsg" hidden></div>
+  </div>
+  <div class="ctrl">
+    <button class="btn pc" id="cBack">⟲ 10 秒</button>
+    <button class="btn pc play" id="cPlay">▶</button>
+    <button class="btn pc" id="cFwd">10 秒 ⟳</button>
+    <span class="tm" id="tNow">0:00</span>
+    <div class="bar" id="bar"><div class="fill" id="barFill"></div><div class="knob" id="barKnob"></div></div>
+    <span class="tm" id="tAll">0:00</span>
+    <label class="mtog"><input type="checkbox" id="cMask" checked>右上黑框</label>
+  </div>
+  <div class="pnote" id="pNote"></div>
+</div>
+
+<script src="config.js"></script>
+<script src="player.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
