@@ -52,7 +52,7 @@
     });
     const acct = lsGet(LS.acct, null);
     if (acct) q.set('login_hint', acct);
-    if (silent) q.set('prompt', 'none');
+    q.set('prompt', silent ? 'none' : 'select_account');   // 手動登入一律讓老師挑帳號（iPad 上常預設成另一個 Google 帳號）
     location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + q;
   }
   function takeTokenFromHash() {
@@ -100,7 +100,13 @@
       q: `name='${CFG.DRIVE_ROOT_NAME.replace(/'/g, "\\'")}' and mimeType='${FOLDER}' and trashed=false`,
       fields: 'files(id,name)', pageSize: 10
     });
-    if (!roots.files || !roots.files.length) throw new Error('雲端硬碟裡找不到「' + CFG.DRIVE_ROOT_NAME + '」資料夾');
+    if (!roots.files || !roots.files.length) {
+      // 最常見的原因：登入成另一個 Google 帳號。登出這個帳號，請老師改選放動畫的那個
+      let who = '';
+      try { const j = await gapi(API + '/drive/v3/about', { fields: 'user(emailAddress)' }); who = j.user.emailAddress; } catch (e) {}
+      localStorage.removeItem(LS.token); localStorage.removeItem(LS.acct);
+      throw new Error('WRONG_ACCT:' + who);
+    }
     const files = {};
     const add = (subj, f) => {
       if (isOld(f.name)) return;
@@ -366,7 +372,8 @@
     clearTimeout(flashT); if (ok || bad) flashT = setTimeout(() => { s.hidden = true; }, bad ? 8000 : 4000);
   }
   function onErr(e) {
-    if (e.message === 'NEED_LOGIN') flash('登入已過期，按右上「登入 Google」重新登入。', true);
+    if (/^WRONG_ACCT:/.test(e.message)) flash('剛剛登入的是 ' + (e.message.slice(11) || '另一個帳號') + '，這個帳號的雲端硬碟裡沒有「' + CFG.DRIVE_ROOT_NAME + '」。請按右上「登入 Google」，改選放動畫的那個帳號。', true);
+    else if (e.message === 'NEED_LOGIN') flash('登入已過期，按右上「登入 Google」重新登入。', true);
     else flash('發生錯誤：' + e.message, true);
     updateHeader();
   }
