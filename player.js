@@ -8,6 +8,9 @@
   const W = 96, H = 54;
   const MASK = { l: 0.843, t: 0.041, w: 0.123, h: 0.104 };   // 右上浮水印，相對影片畫面
   const SEG_VER = 1;                                          // 偵測演算法版本，改演算法時加 1 讓舊快取失效
+  // 還沒偵測過的片先用經驗值開播，背景算出精確值再換上：
+  //   全部成片片頭 Logo 約 4 秒；片尾白底實測在結尾前 3～9 秒，先保守停在結尾前 8 秒（寧可早停，不播到片尾問候）
+  const GUESS_START = 4.1, GUESS_TAIL = 8;
 
   // ---------- 偵測 ----------
   function cornerStats(ctx) {
@@ -35,9 +38,10 @@
     });
   }
 
-  async function detectSegment(src) {
+  // stream=true 時影片是邊下載邊播的串流：只讀片頭幾秒與片尾十幾秒的片段，不預載整支
+  async function detectSegment(src, stream) {
     const v = document.createElement('video');
-    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.muted = true; v.playsInline = true; v.preload = stream ? 'metadata' : 'auto';
     v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
     v.style.cssText = 'position:fixed;left:-9999px;top:0;width:96px;height:54px;opacity:0;pointer-events:none';
     document.body.appendChild(v);
@@ -99,20 +103,23 @@
     }
   }
 
-  async function getSegment(key, src) {
-    const lk = 'seg:' + key;
+  function savedSegment(key) {
     try {
-      const s = JSON.parse(localStorage.getItem(lk) || 'null');
+      const s = JSON.parse(localStorage.getItem('seg:' + key) || 'null');
       if (s && s.v === SEG_VER) return s;
     } catch (e) {}
-    const s = await detectSegment(src);
-    try { localStorage.setItem(lk, JSON.stringify(s)); } catch (e) {}
+    return null;
+  }
+  async function getSegment(key, src, stream) {
+    const old = savedSegment(key); if (old) return old;
+    const s = await detectSegment(src, stream);
+    try { localStorage.setItem('seg:' + key, JSON.stringify(s)); } catch (e) {}
     return s;
   }
 
   // ---------- 播放器 ----------
   const $ = id => document.getElementById(id);
-  let seg = null, url = null, raf = 0, onCloseCb = null, onHomeCb = null;
+  let seg = null, url = null, raf = 0, onCloseCb = null, onHomeCb = null, onErrorCb = null;
   const fmt = s => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 
   function placeMask() {
@@ -154,9 +161,19 @@
 
   function msg(t) { const m = $('pMsg'); m.hidden = !t; m.textContent = t || ''; }
 
-  async function open({ title, src, key, onClose, onHome }) {
+  function segNote(s) {
+    const notes = [];
+    if (!s.introFound) notes.push('沒找到片頭');
+    if (!s.outroFound) notes.push('沒找到片尾');
+    return notes.length ? notes.join('、') + '，這段照原片播。' : '';
+  }
+
+  // 開片流程（下載好的 blob 與串流都走這條）：
+  //   已有偵測結果 → 直接用精確範圍播；
+  //   沒有 → 先用經驗值（4.1 秒起、結尾前 8 秒停）馬上開播，另一個隱藏 video 在背景算精確值，算好就換上並存起來。
+  async function open({ title, src, key, stream, onClose, onHome, onError }) {
     close(true);
-    onCloseCb = onClose; onHomeCb = onHome;
+    onCloseCb = onClose; onHomeCb = onHome; onErrorCb = onError;
     url = src;
     $('pTitle').textContent = title;
     $('pNote').textContent = '';
@@ -164,27 +181,45 @@
     $('mask').style.display = 'none';
     const v = $('vid');
     seg = null; render();
-    msg('準備中⋯（第一次開這支片要先找片頭片尾，約幾秒）');
-    try {
-      seg = await getSegment(key, src);
-      const notes = [];
-      if (!seg.introFound) notes.push('沒找到片頭');
-      if (!seg.outroFound) notes.push('沒找到片尾');
-      $('pNote').textContent = notes.length ? notes.join('、') + '，這段照原片播。' : '';
-    } catch (e) {
-      seg = { start: 0, end: 0, failed: true };
-      $('pNote').textContent = '片頭片尾偵測失敗（' + e.message + '），整支照原片播放。';
-    }
-    if (url !== src) return;   // 偵測期間已關閉或換片
+    msg('載入中⋯');
+    const known = savedSegment(key);
     v.src = src;
-    await new Promise(res => { if (v.readyState >= 1) res(); else v.addEventListener('loadedmetadata', res, { once: true }); });
-    if (seg.failed) { seg.end = v.duration; seg.start = 0; }
+    try {
+      await new Promise((res, rej) => {
+        if (v.readyState >= 1) return res();
+        v.addEventListener('loadedmetadata', res, { once: true });
+        v.addEventListener('error', () => rej(new Error('影片載入失敗')), { once: true });
+      });
+    } catch (e) {
+      if (url === src) msg((onErrorCb && onErrorCb()) || '影片載入失敗，請再點一次。');
+      return;
+    }
+    if (url !== src) return;   // 載入期間已關閉或換片
+    const dur = v.duration;
+    if (known) {
+      seg = known;
+      $('pNote').textContent = segNote(seg);
+    } else {
+      seg = { start: Math.min(GUESS_START, dur / 4), end: Math.max(dur - GUESS_TAIL, dur / 2), guess: true };
+      $('pNote').textContent = '正在找片頭片尾的精確位置，先用預設範圍播放⋯';
+    }
     v.currentTime = seg.start;
     msg('');
     placeMask();
     window.__seg = seg;   // 測試用
     try { await v.play(); } catch (e) { /* iPad 需要使用者手勢時，按 ▶ 即可 */ }
     cancelAnimationFrame(raf); raf = requestAnimationFrame(tick);
+    if (known) return;
+    getSegment(key, src, stream).then(s => {
+      if (url !== src) return;
+      seg = s; window.__seg = seg;
+      $('pNote').textContent = segNote(s);
+      if (v.currentTime > s.end) { v.pause(); v.currentTime = s.end; }
+      render();
+    }).catch(e => {
+      if (url !== src) return;
+      $('pNote').textContent = '片頭片尾偵測失敗（' + e.message + '），先用預設範圍播放。';
+    });
   }
 
   function close(silent) {
@@ -213,6 +248,7 @@
     v.addEventListener('loadedmetadata', placeMask);
     v.addEventListener('seeking', () => { if (seg && (v.currentTime < seg.start - 0.05 || v.currentTime > seg.end + 0.05)) v.currentTime = clampT(v.currentTime); });
     v.addEventListener('ended', () => { if (seg) v.currentTime = seg.end; render(); });
+    v.addEventListener('error', () => { if (url && seg) msg((onErrorCb && onErrorCb()) || '影片播放中斷，請再點一次。'); });
     window.addEventListener('resize', placeMask);
     window.addEventListener('orientationchange', () => setTimeout(placeMask, 300));
     if (window.ResizeObserver) new ResizeObserver(placeMask).observe($('stage'));

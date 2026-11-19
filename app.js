@@ -2,7 +2,10 @@
 (function () {
   const CFG = window.APP_CONFIG || {};
   const $ = id => document.getElementById(id);
-  const DEV = new URLSearchParams(location.search).get('dev') === '1';
+  const QS = new URLSearchParams(location.search);
+  const DEV = QS.get('dev') === '1';
+  // 測試模式可把 Drive 端點換成本機假伺服器（?dev=1&api=http://127.0.0.1:PORT）；正式環境固定 googleapis
+  const API = (DEV && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(QS.get('api') || '')) ? QS.get('api') : 'https://www.googleapis.com';
   const VCACHE = 'class-videos-v1';
   const LS = { token: 'auth', map: 'drivemap', meta: 'dlmeta', state: 'oauth_state', path: 'lastpath' };
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
@@ -67,7 +70,7 @@
       const p = { q: `'${parent}' in parents and trashed=false`, pageSize: 1000,
         fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum)' };
       if (pageToken) p.pageToken = pageToken;
-      const j = await gapi('https://www.googleapis.com/drive/v3/files', p);
+      const j = await gapi(API + '/drive/v3/files', p);
       out.push(...(j.files || [])); pageToken = j.nextPageToken;
     } while (pageToken);
     return out;
@@ -75,7 +78,7 @@
   const FOLDER = 'application/vnd.google-apps.folder';
   async function scanDrive() {
     flash('正在讀取雲端影片清單⋯');
-    const roots = await gapi('https://www.googleapis.com/drive/v3/files', {
+    const roots = await gapi(API + '/drive/v3/files', {
       q: `name='${CFG.DRIVE_ROOT_NAME.replace(/'/g, "\\'")}' and mimeType='${FOLDER}' and trashed=false`,
       fields: 'files(id,name)', pageSize: 10
     });
@@ -154,7 +157,7 @@
     let chip, cls = 'card v', prog = '';
     if (f && busy[f.id] !== undefined) { chip = `<span class="chip">⬇ 下載中 ${Math.round(busy[f.id] * 100)}%</span>`; prog = `<div class="prog" style="width:${busy[f.id] * 100}%"></div>`; }
     else if (isCached(f)) chip = '<span class="chip dl">✓ 已下載</span>';
-    else if (f) chip = '<span class="chip">☁ 點了才下載</span>';
+    else if (f) chip = '<span class="chip">☁ 點了直接播</span><button class="btn save" data-save="1">⬇ 存到 iPad</button>';
     else if (!MAP) chip = '<span class="chip no">登入後才能下載</span>';
     else { chip = '<span class="chip no">雲端找不到這支</span>'; cls += ' off'; }
     return `<div class="${cls}" data-play="${esc(name)}" ${f ? `data-fid="${f.id}"` : ''}><b>${esc(name)}</b>${chip}${prog}</div>`;
@@ -176,7 +179,7 @@
       const left = files.filter(f => !isCached(f));
       const tb = files.length ? `<div class="toolbar"><button class="btn" id="bChap" ${left.length ? '' : 'disabled'}>⬇ 整章下載${left.length ? `（${left.length} 支未下載）` : '（都已下載）'}</button><span class="hint">課前先抓好，上課就不用等。</span></div>` : '';
       m.innerHTML = tb + `<div class="grid">${n.map(x => videoCard(subj, x)).join('')}</div>`;
-      if ($('bChap')) $('bChap').onclick = () => downloadMany(left);
+      if ($('bChap')) $('bChap').onclick = () => downloadMany(files.filter(f => !isCached(f)));   // 按下當下再算，已存的不重抓
     } else {
       m.innerHTML = `<div class="grid">${Object.keys(n).map(k =>
         `<div class="card" data-go='${esc(JSON.stringify([...path, k]))}'><b>${esc(k)}</b><span class="chip ${k === '新上架' ? 'new' : ''}">${cnt(n[k]) ? cnt(n[k]) + ' 支' : '動畫準備中'}</span></div>`).join('')}</div>`;
@@ -208,7 +211,7 @@
     if (!token()) { if (confirm('登入已過期，要下載新影片需要重新登入 Google。現在登入？')) login(); return false; }
     busy[f.id] = 0; refreshCard(f.id);
     try {
-      const r = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, { headers: { Authorization: 'Bearer ' + token() } });
+      const r = await fetch(`${API}/drive/v3/files/${f.id}?alt=media`, { headers: { Authorization: 'Bearer ' + token() } });
       if (r.status === 401) { localStorage.removeItem(LS.token); throw new Error('登入過期'); }
       if (!r.ok) throw new Error('下載失敗 ' + r.status);
       const total = +r.headers.get('Content-Length') || f.size || 0;
@@ -241,8 +244,33 @@
     if (Array.isArray(node())) render();
   }
 
+  // 把 token 交給 service worker（串流代理要用）。SW 還沒接管頁面（第一次開）或沒回應就回 false，改走先下載再播。
+  function streamReady() {
+    const sw = navigator.serviceWorker && navigator.serviceWorker.controller;
+    const t = lsGet(LS.token, null);
+    if (!sw || !token() || QS.get('nostream') === '1') return Promise.resolve(false);
+    return new Promise(res => {
+      const ch = new MessageChannel();
+      const to = setTimeout(() => res(false), 2000);
+      ch.port1.onmessage = e => { clearTimeout(to); res(!!(e.data && e.data.ok)); };
+      sw.postMessage({ type: 'auth', token: t.access_token, exp: t.exp, api: API }, [ch.port2]);
+    });
+  }
+
   async function playFile(f, title) {
+    const opts = { title, key: f.id + ':' + f.md5Checksum, onClose: () => render(), onHome: () => go([]) };
     if (!isCached(f)) {
+      if (!token()) { if (confirm('登入已過期，要播放還沒存到 iPad 的影片需要重新登入 Google。現在登入？')) login(); return; }
+      // 沒存過的片：經 service worker 串流，點了馬上播，不先下載
+      if (await streamReady()) {
+        const src = new URL('stream/' + encodeURIComponent(f.id) + '?size=' + (f.size || 0) + '&md5=' + encodeURIComponent(f.md5Checksum || ''), location.href).href;
+        Player.open(Object.assign(opts, {
+          src, stream: true,
+          onError: () => token() ? '影片串流中斷，請檢查網路後再點一次。' : '登入已過期，請按右上「登入 Google」後再播。'
+        }));
+        return;
+      }
+      // 退路：SW 還沒接管（第一次開 App），照舊先下載再播；下次開啟就會改用串流
       if (!await download(f, title)) return;
       if (!Array.isArray(node()) || !$('player').hidden) return;
     }
@@ -250,7 +278,7 @@
     const r = await c.match(vkey(f));
     if (!r) { cached.delete(f.id + '|' + f.md5Checksum); render(); return; }
     const url = URL.createObjectURL(await r.blob());   // 同源 blob，canvas 讀像素才不會被擋
-    Player.open({ title, src: url, key: f.id + ':' + f.md5Checksum, onClose: () => render(), onHome: () => go([]) });
+    Player.open(Object.assign(opts, { src: url }));
   }
 
   // ---------- 管理頁 ----------
@@ -336,6 +364,12 @@
     };
     document.body.addEventListener('click', e => {
       const g = e.target.closest('[data-go]'); if (g) return go(JSON.parse(g.dataset.go));
+      const sv = e.target.closest('[data-save]');
+      if (sv) {   // 單支「存到 iPad」：只下載不播
+        const f = fileOf(path[0], sv.closest('[data-play]').dataset.play);
+        if (f) download(f).then(ok => { if (ok) flash('已存到 iPad，之後沒網路也能播。', false, true); if (Array.isArray(node()) && $('player').hidden) render(); });
+        return;
+      }
       const c = e.target.closest('[data-play]');
       if (c && !c.classList.contains('off')) {
         const f = fileOf(path[0], c.dataset.play);
@@ -351,7 +385,7 @@
     go(Array.isArray(path) ? path : []);
 
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    if ('serviceWorker' in navigator && !DEV) navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator && QS.get('nosw') !== '1') navigator.serviceWorker.register('sw.js').catch(() => {});
 
     const stale = !MAP || Date.now() - MAP.at > (CFG.MAP_MAX_AGE_HOURS || 12) * 3600e3;
     if (token() && (fresh || stale)) scanDrive().then(render).catch(onErr);
