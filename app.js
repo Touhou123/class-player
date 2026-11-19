@@ -7,7 +7,7 @@
   // 測試模式可把 Drive 端點換成本機假伺服器（?dev=1&api=http://127.0.0.1:PORT）；正式環境固定 googleapis
   const API = (DEV && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(QS.get('api') || '')) ? QS.get('api') : 'https://www.googleapis.com';
   const VCACHE = 'class-videos-v1';
-  const LS = { token: 'auth', map: 'drivemap', meta: 'dlmeta', state: 'oauth_state', path: 'lastpath' };
+  const LS = { token: 'auth', map: 'drivemap', meta: 'dlmeta', state: 'oauth_state', path: 'lastpath', acct: 'acct', silent: 'silent_at', pend: 'pendplay' };
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -32,8 +32,17 @@
     return t && t.exp > Date.now() + 60000 ? t.access_token : null;
   }
   function redirectUri() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
-  function login() {
+  // Google 這種純網頁登入的通行證固定 1 小時、不能延長。改成「快過期就自動換一張」：
+  // 帶 prompt=none 跳去 Google 再跳回來（約 1～2 秒、不用點），Google 那邊還記得登入就直接發新的。
+  // Google 不肯（例如很久沒用、登入被清掉）才請老師手動按登入。
+  function minsLeft() { const t = lsGet(LS.token, null); return t ? (t.exp - Date.now()) / 60000 : -1; }
+  function canSilent() {
+    return navigator.onLine !== false && lsGet(LS.acct, null) && Date.now() - (lsGet(LS.silent, 0) || 0) > 120000;   // 2 分鐘內不重試，避免來回跳
+  }
+  function silentLogin() { lsSet(LS.silent, Date.now()); login(true); }
+  function login(silent) {
     if (/^REPLACE_/.test(CFG.CLIENT_ID || '')) { alert('還沒設定 Google 登入（config.js 的 CLIENT_ID）。'); return; }
+    if (silent !== true) silent = false;
     const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
     lsSet(LS.state, state);
     lsSet(LS.path, path);
@@ -41,6 +50,9 @@
       client_id: CFG.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'token',
       scope: 'https://www.googleapis.com/auth/drive.readonly', include_granted_scopes: 'true', state
     });
+    const acct = lsGet(LS.acct, null);
+    if (acct) q.set('login_hint', acct);
+    if (silent) q.set('prompt', 'none');
     location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + q;
   }
   function takeTokenFromHash() {
@@ -48,13 +60,19 @@
     const h = new URLSearchParams(location.hash.slice(1));
     history.replaceState(null, '', location.pathname + location.search);
     const want = lsGet(LS.state, null); localStorage.removeItem(LS.state);
-    if (h.get('error')) { flash('登入沒有完成（' + h.get('error') + '）。', true); return false; }
+    if (h.get('error')) {
+      localStorage.removeItem(LS.pend);
+      if (/required$/.test(h.get('error'))) flash('登入已過期，請按右上「登入 Google」。已存到 iPad 的影片照樣能播。', true);   // 自動續登入被 Google 擋下
+      else flash('登入沒有完成（' + h.get('error') + '）。', true);
+      const p = lsGet(LS.path, []); if (Array.isArray(p)) path = p;
+      return false;
+    }
     if (!want || h.get('state') !== want) { flash('登入回傳的驗證碼不符，請再登入一次。', true); return false; }
     lsSet(LS.token, { access_token: h.get('access_token'), exp: Date.now() + (+h.get('expires_in') || 3600) * 1000 });
     const p = lsGet(LS.path, []); if (Array.isArray(p)) path = p;
     return true;
   }
-  function logout() { localStorage.removeItem(LS.token); updateHeader(); flash('已登出。已下載的影片照樣可以播。'); }
+  function logout() { localStorage.removeItem(LS.token); localStorage.removeItem(LS.acct); updateHeader(); flash('已登出。已下載的影片照樣可以播。'); }
 
   // ---------- Drive ----------
   async function gapi(url, params) {
@@ -260,11 +278,14 @@
   async function playFile(f, title) {
     const opts = { title, key: f.id + ':' + f.md5Checksum, onClose: () => render(), onHome: () => go([]) };
     if (!isCached(f)) {
+      // 剩不到 10 分鐘就先自動換新（影片最長幾分鐘，避免播到一半斷掉），換完回來自動接著開這支
+      if ((!token() || minsLeft() < 10) && canSilent()) { lsSet(LS.pend, { title, at: Date.now() }); silentLogin(); return; }
       if (!token()) { if (confirm('登入已過期，要播放還沒存到 iPad 的影片需要重新登入 Google。現在登入？')) login(); return; }
       // 沒存過的片：經 service worker 串流，點了馬上播，不先下載
       // 先確認 Google 還認這個登入（token 可能提早失效，App 只看到期時間會誤判）
       try {
         const chk = await fetch(API + '/drive/v3/about?fields=kind', { headers: { Authorization: 'Bearer ' + token() } });
+        if (chk.status === 401 && canSilent()) { localStorage.removeItem(LS.token); lsSet(LS.pend, { title, at: Date.now() }); silentLogin(); return; }
         if (chk.status === 401) { localStorage.removeItem(LS.token); updateHeader(); if (confirm('登入已失效，要播放還沒存到 iPad 的影片需要重新登入 Google。現在登入？')) login(); return; }
       } catch (e) { /* 沒網路就交給下面的流程顯示錯誤 */ }
       if (await streamReady()) {
@@ -312,7 +333,7 @@
         <div class="toolbar" style="margin:16px 0 0">${rows.length ? '<button class="btn del" id="bDelAll">全部刪除</button>' : ''}</div>
       </div>
       <div class="panel"><h2>Google 帳號與雲端清單</h2>
-        <p>${token() ? '已登入，' + Math.max(0, Math.round((tk.exp - Date.now()) / 60000)) + ' 分鐘後過期（過期後已下載的影片照樣能播，下載新片才要再登入）。' : '目前沒有登入。'}</p>
+        <p>${token() ? '已登入，' + Math.max(0, Math.round((tk.exp - Date.now()) / 60000)) + ' 分鐘後到期；快到期時會自動換新，只有 Google 那邊登入被清掉時才要再按一次登入。' : '目前沒有登入。'}</p>
         <p>${MAP ? '雲端影片清單上次更新：' + new Date(MAP.at).toLocaleString('zh-TW') + `，共 ${Object.keys(MAP.files).length} 支。` : '還沒讀過雲端影片清單。'}</p>
         <div class="toolbar" style="margin:16px 0 0">
           <button class="btn" id="bRescan">重新讀取雲端清單</button>
@@ -393,6 +414,17 @@
     if ('serviceWorker' in navigator && QS.get('nosw') !== '1') navigator.serviceWorker.register('sw.js').catch(() => {});
 
     const stale = !MAP || Date.now() - MAP.at > (CFG.MAP_MAX_AGE_HOURS || 12) * 3600e3;
+    // 記下登入的帳號（只存在這台 iPad），自動續登入時告訴 Google 是哪個帳號
+    if (token() && (fresh || !lsGet(LS.acct, null)))
+      fetch(API + '/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + token() } })
+        .then(r => r.ok ? r.json() : null).then(j => { if (j && j.user && j.user.emailAddress) lsSet(LS.acct, j.user.emailAddress); }).catch(() => {});
+    // 打開 App 時通行證沒了或剩不到 20 分鐘：先自動換新（上課前打開就換好，整堂課不會斷）
+    if (!fresh && minsLeft() < 20 && canSilent()) { silentLogin(); return; }
+    // 剛換完通行證回來：接著開剛剛點的那支
+    const pend = lsGet(LS.pend, null); localStorage.removeItem(LS.pend);
+    if (fresh && pend && Date.now() - pend.at < 180000 && Array.isArray(path)) {
+      const f = fileOf(path[0], pend.title); if (f) playFile(f, pend.title);
+    }
     if (token() && (fresh || stale)) scanDrive().then(render).catch(onErr);
     else if (!token() && !MAP) flash('第一次使用：按右上「登入 Google」讀取雲端的動畫清單。');
   }
