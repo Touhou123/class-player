@@ -1,7 +1,7 @@
 // App 外殼的離線快取。只處理同源的 App 檔案；googleapis 與其他網域一律放行不攔。
 // 影片快取（class-videos-*）由 app.js 自己管，這裡不碰、清舊版時也不刪。
 // 部署新版時把 VERSION 改掉，iPad 下次開啟會換新外殼。
-const VERSION = 'shell-2026-11-19a';
+const VERSION = 'shell-2026-11-19b';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'player.js', 'config.js',
   'manifest.webmanifest', 'data/catalog.json',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
