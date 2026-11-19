@@ -31,7 +31,7 @@
 
   function seekTo(v, t) {
     return new Promise((res, rej) => {
-      const to = setTimeout(() => { v.removeEventListener('seeked', ok); rej(new Error('seek 逾時')); }, 8000);
+      const to = setTimeout(() => { v.removeEventListener('seeked', ok); rej(new Error('seek 逾時')); }, 20000);   // 串流時主畫面也在抓資料，8 秒常不夠
       function ok() { clearTimeout(to); v.removeEventListener('seeked', ok); res(); }
       v.addEventListener('seeked', ok);
       v.currentTime = t;
@@ -232,12 +232,51 @@
     if (!silent && onCloseCb) onCloseCb();
   }
 
+
+  // ---------- 音量 ----------
+  // iPad Safari 的 video.volume 是唯讀（永遠 1），只能接 Web Audio 的 GainNode 調。
+  // 注意：影片一接上 AudioContext，聲音就只從 context 出；context 若被暫停會整個無聲，
+  // 所以只在使用者點擊當下、確定 context 已在跑才接，接不上就退回 video.volume（電腦有效）。
+  let actx = null, gain = null, wired = false;
+  const VOL_KEY = 'vol';
+  let vol = (() => { try { const x = +localStorage.getItem(VOL_KEY); return isFinite(x) && localStorage.getItem(VOL_KEY) !== null ? x : 100; } catch (e) { return 100; } })();
+  let muted = false;
+  function applyVol() {
+    const v = $('vid'), g = muted ? 0 : vol / 100;
+    if (wired && gain) { gain.gain.value = g; v.volume = 1; v.muted = false; }
+    else { v.volume = Math.min(1, g); v.muted = g === 0; }
+    $('cVol').value = vol; $('vPct').textContent = muted ? '靜音' : vol + '%';
+    $('cMute').textContent = muted || vol === 0 ? '🔇' : '🔊';
+  }
+  function wireAudio() {   // 只在使用者動音量時呼叫（點擊當下）；沒動過音量就維持原生播放，最不容易出事
+    try {
+      // iPad 的 Web Audio 預設會被側邊靜音鍵／靜音模式消音，改成「播放」類別才跟影片一樣有聲
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+      if (!actx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return applyVol(); actx = new AC(); }
+      const wire = () => {
+        if (!wired && actx.state === 'running') {
+          const src = actx.createMediaElementSource($('vid'));
+          gain = actx.createGain(); src.connect(gain); gain.connect(actx.destination); wired = true;
+        }
+        applyVol();
+      };
+      if (actx.state === 'running') wire(); else actx.resume().then(wire, applyVol);
+    } catch (e) { /* 接不上就用 video.volume */ }
+    applyVol();
+  }
+
   function seekRel(d) { const v = $('vid'); if (!seg) return; v.currentTime = clampT(v.currentTime + d); render(); }
 
   function bind() {
     const v = $('vid');
+    applyVol();
+    // 接上 Web Audio 後，iPad 切到背景回來 context 會被暫停（無聲），任何點擊都順手喚醒
+    document.addEventListener('pointerdown', () => { if (wired && actx.state !== 'running') actx.resume(); }, true);
+    $('cVol').oninput = () => { vol = +$('cVol').value; muted = false; try { localStorage.setItem(VOL_KEY, vol); } catch (e) {} wireAudio(); };
+    $('cMute').onclick = () => { muted = !muted; wireAudio(); };
     $('cPlay').onclick = () => {
       if (!seg) return;
+      if (vol !== 100 && !wired) wireAudio();   // 上次調過音量：第一次按 ▶ 時套用
       if (v.paused) { if (v.currentTime >= seg.end - 0.1) v.currentTime = seg.start; v.play(); } else v.pause();
     };
     $('cBack').onclick = () => seekRel(-10);

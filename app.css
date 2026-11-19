@@ -62,3 +62,9 @@ main{flex:1;overflow:auto;padding:24px;-webkit-overflow-scrolling:touch}
 [hidden]{display:none!important}
 .btn.save{position:absolute;right:8px;bottom:8px;min-height:48px;font-size:15px;padding:8px 16px;background:var(--acc2);color:var(--acc)}
 .card.v:has(.btn.save){padding-bottom:64px}
+
+/* 音量：iPad 不能直接改 video.volume，走 Web Audio 增益；超過 100% 是放大 */
+.vol{display:flex;align-items:center;gap:8px}
+.btn.vbtn{min-width:56px;font-size:20px}
+.vol input[type=range]{width:136px;height:40px;accent-color:#fff}
+.vpct{font-size:14px;min-width:44px;color:#ddd}
