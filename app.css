@@ -68,3 +68,5 @@ main{flex:1;overflow:auto;padding:24px;-webkit-overflow-scrolling:touch}
 .btn.vbtn{min-width:56px;font-size:20px}
 .vol input[type=range]{width:136px;height:40px;accent-color:#fff}
 .vpct{font-size:14px;min-width:44px;color:#ddd}
+.btn.save.unsave{background:#fbeaea;color:var(--bad)}
+.card.v:has(.btn.save){padding-bottom:64px}

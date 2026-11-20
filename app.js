@@ -179,8 +179,8 @@
   function videoCard(subj, name) {
     const f = fileOf(subj, name);
     let chip, cls = 'card v', prog = '';
-    if (f && busy[f.id] !== undefined) { chip = `<span class="chip">⬇ 下載中 ${Math.round(busy[f.id] * 100)}%</span>`; prog = `<div class="prog" style="width:${busy[f.id] * 100}%"></div>`; }
-    else if (isCached(f)) chip = '<span class="chip dl">✓ 已下載</span>';
+    if (f && busy[f.id] !== undefined) { chip = `<span class="chip">⬇ 下載中 ${Math.round(busy[f.id] * 100)}%</span><button class="btn save" data-cancel="1">✕ 取消</button>`; prog = `<div class="prog" style="width:${busy[f.id] * 100}%"></div>`; }
+    else if (isCached(f)) chip = '<span class="chip dl">✓ 已下載</span><button class="btn save unsave" data-unsave="1">🗑 刪除</button>';
     else if (f) chip = '<span class="chip">☁ 點了直接播</span><button class="btn save" data-save="1">⬇ 存到 iPad</button>';
     else if (!MAP) chip = '<span class="chip no">登入後才能下載</span>';
     else { chip = '<span class="chip no">雲端找不到這支</span>'; cls += ' off'; }
@@ -201,9 +201,9 @@
       if (!n.length) { m.innerHTML = '<div class="empty">動畫準備中。這一章的動畫做好後會自動出現在這裡。</div>'; return; }
       const files = n.map(x => fileOf(subj, x)).filter(Boolean);
       const left = files.filter(f => !isCached(f));
-      const tb = files.length ? `<div class="toolbar"><button class="btn" id="bChap" ${left.length ? '' : 'disabled'}>⬇ 整章下載${left.length ? `（${left.length} 支未下載）` : '（都已下載）'}</button><span class="hint">課前先抓好，上課就不用等。</span></div>` : '';
+      const tb = files.length ? `<div class="toolbar"><button class="btn ${many ? 'del' : ''}" id="bChap" ${left.length || many ? '' : 'disabled'}>${many ? '✕ 停止整章下載' : '⬇ 整章下載' + (left.length ? `（${left.length} 支未下載）` : '（都已下載）')}</button><span class="hint">課前先抓好，上課就不用等。</span></div>` : '';
       m.innerHTML = tb + `<div class="grid">${n.map(x => videoCard(subj, x)).join('')}</div>`;
-      if ($('bChap')) $('bChap').onclick = () => downloadMany(files.filter(f => !isCached(f)));   // 按下當下再算，已存的不重抓
+      if ($('bChap')) $('bChap').onclick = () => many ? stopMany() : downloadMany(files.filter(f => !isCached(f)));   // 按下當下再算，已存的不重抓
     } else {
       m.innerHTML = `<div class="grid">${Object.keys(n).map(k =>
         `<div class="card" data-go='${esc(JSON.stringify([...path, k]))}'><b>${esc(k)}</b><span class="chip ${k === '新上架' ? 'new' : ''}">${cnt(n[k]) ? cnt(n[k]) + ' 支' : '動畫準備中'}</span></div>`).join('')}</div>`;
@@ -230,12 +230,21 @@
     }
   }
 
+  const ctl = {};          // 下載中的 AbortController，按「✕ 取消」用
+  let many = null;        // 整章下載進行中：{ stop }
+  function stopMany() { if (many) many.stop = true; Object.values(ctl).forEach(a => a.abort()); }
+  async function removeDownload(f) {
+    const c = await caches.open(VCACHE);
+    for (const k of await c.keys()) if (new URL(k.url).pathname.endsWith('/' + f.id)) await c.delete(k);
+    const meta = lsGet(LS.meta, {}); delete meta[f.id]; lsSet(LS.meta, meta);
+    cached.clear(); await loadCachedSet();
+  }
   async function download(f, label) {
     if (busy[f.id] !== undefined) return false;
     if (!token()) { if (confirm('登入已過期，要下載新影片需要重新登入 Google。現在登入？')) login(); return false; }
-    busy[f.id] = 0; refreshCard(f.id);
+    busy[f.id] = 0; const ac = ctl[f.id] = new AbortController(); refreshCard(f.id);
     try {
-      const r = await fetch(`${API}/drive/v3/files/${f.id}?alt=media`, { headers: { Authorization: 'Bearer ' + token() } });
+      const r = await fetch(`${API}/drive/v3/files/${f.id}?alt=media`, { headers: { Authorization: 'Bearer ' + token() }, signal: ac.signal });
       if (r.status === 401) { localStorage.removeItem(LS.token); throw new Error('登入過期'); }
       if (!r.ok) throw new Error('下載失敗 ' + r.status);
       const total = +r.headers.get('Content-Length') || f.size || 0;
@@ -253,18 +262,21 @@
       cached.add(f.id + '|' + f.md5Checksum);
       return true;
     } catch (e) {
-      flash(`「${label || displayName(f.name)}」下載失敗：${e.message}`, true);
+      if (ac.signal.aborted) flash(`已取消下載「${label || displayName(f.name)}」，沒有存進 iPad。`);
+      else flash(`「${label || displayName(f.name)}」下載失敗：${e.message}`, true);
       return false;
-    } finally { delete busy[f.id]; refreshCard(f.id); }
+    } finally { delete busy[f.id]; delete ctl[f.id]; refreshCard(f.id); }
   }
 
   async function downloadMany(list) {
-    let ok = 0;
-    for (let i = 0; i < list.length; i++) {
+    let ok = 0; many = { stop: false }; if (Array.isArray(node())) render();
+    for (let i = 0; i < list.length && !many.stop; i++) {
       flash(`整章下載中：第 ${i + 1}／${list.length} 支⋯`);
       if (await download(list[i])) ok++; else if (!token()) break;
     }
-    flash(`整章下載完成：${ok}／${list.length} 支。`, ok < list.length, ok === list.length);
+    const stopped = many.stop; many = null;
+    if (stopped) flash(`已停止整章下載：存好 ${ok} 支，其餘沒下載（已存的在卡片上按「🗑 刪除」可移除）。`);
+    else flash(`整章下載完成：${ok}／${list.length} 支。`, ok < list.length, ok === list.length);
     if (Array.isArray(node())) render();
   }
 
@@ -397,6 +409,14 @@
     };
     document.body.addEventListener('click', e => {
       const g = e.target.closest('[data-go]'); if (g) return go(JSON.parse(g.dataset.go));
+      const cx = e.target.closest('[data-cancel]');
+      if (cx) { const f = fileOf(path[0], cx.closest('[data-play]').dataset.play); if (f && ctl[f.id]) ctl[f.id].abort(); return; }
+      const us = e.target.closest('[data-unsave]');
+      if (us) {
+        const name = us.closest('[data-play]').dataset.play, f = fileOf(path[0], name);
+        if (f && confirm(`把「${name}」從 iPad 刪掉？之後有網路照樣可以直接播。`)) removeDownload(f).then(() => { flash(`已從 iPad 刪除「${name}」。`, false, true); render(); });
+        return;
+      }
       const sv = e.target.closest('[data-save]');
       if (sv) {   // 單支「存到 iPad」：只下載不播
         const f = fileOf(path[0], sv.closest('[data-play]').dataset.play);
